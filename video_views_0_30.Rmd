@@ -1,0 +1,381 @@
+---
+title: "Exploring relationships for video views"
+author: "Annie Flippo"
+output: html_document
+---
+
+This is an exploratory analysis of video views 
+from publish date to various ages for AwesomenessTV channel videos.
+
+```{r setup, include=FALSE, warning=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(dplyr)
+library(RJDBC)
+
+setwd("~/Box Sync/AwesomenessTV/models/")
+
+# Source my local user/pwd setup
+# sets up myAccount myPwd for Redshift login and connection string
+source ("~/.redshift_user.R")
+```
+
+```{r function_in_use, echo=FALSE, warning=FALSE}
+# http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/
+#
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots==1) {
+    print(plots[[1]])
+    
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+```{r dataprep, echo=FALSE, warning=FALSE, include=FALSE}
+video_views <- dbGetQuery(conn, "
+      select a.video_id, age, sum(organic_traffic) 
+      from rpt_aging a
+      join 
+      (select a.format_id as format_id, b.name as name, a.video_id as video_id, a.title as title, 
+              a.release_date as release_date
+         from yt_meta_format a
+         join yt_meta_format_master b
+         on a.format_id = b.id
+         join yt_meta_data c
+         on a.video_id = c.video_id
+         where c.channel_id = 'UCWljxewHlJE3M7U_6_zFNyA') z
+      on a.video_id = z.video_id
+      and age in (0, 3, 7, 30, 60)
+      group by a.video_id, age" )
+
+video_attr <- dbGetQuery(conn, "
+    select a.video_id, a.title, a.content_category, b.category as yt_category, 
+           a.producer_id, c.name as producer_name 
+    from yt_meta_format a 
+    join yt_meta_video b 
+    on a.video_id = b.video_id 
+    join yt_meta_format_master c 
+    on a.producer_id = c.id
+    where producer_name not like 'DreamWorks%' ")
+
+# prepare to pivot table
+age0 <- video_views[which(video_views$age == 0), ]
+age3 <- video_views[which(video_views$age == 3), ]
+age7 <- video_views[which(video_views$age == 7), ]
+age30 <- video_views[which(video_views$age == 30), ]
+age60 <- video_views[which(video_views$age == 60), ]
+
+# renaming headers so it can merged
+colnames(age0) <- c("video_id", "age0", "sum0")
+colnames(age3) <- c("video_id", "age3", "sum3")
+colnames(age7) <- c("video_id", "age7", "sum7")
+colnames(age30) <- c("video_id", "age30", "sum30")
+colnames(age60) <- c("video_id", "age60", "sum60")
+
+# combine 
+test <- inner_join(age0, age3)
+test <- inner_join(test, age7)
+test <- inner_join(test, age30)
+test <- inner_join(test, age60)
+test <- left_join(test, video_attr)
+
+vid_view_data <- test[,c("video_id","sum0","sum3","sum7","sum30","sum60","title","content_category","yt_category","producer_name")]
+
+# count how many rows with nulls
+dim(vid_view_data[!complete.cases(vid_view_data),])
+
+# create a new data frame without missing data
+complete_data <- vid_view_data[complete.cases(vid_view_data),]
+
+complete_data$logDay0 <- log2(complete_data$sum0)
+complete_data$logDay3 <- log2(complete_data$sum3)
+complete_data$logDay7 <- log2(complete_data$sum7)
+complete_data$logDay30 <- log2(complete_data$sum30)
+complete_data$logDay60 <- log2(complete_data$sum60)
+```
+
+```{r correlation, echo=FALSE, warning=FALSE, include=FALSE}
+# Pearson correlation between logarithmically transformed data vs non-transform data
+
+# Relationship with log views at 30 days
+cor_0_30 <- cor(complete_data$logDay0, complete_data$logDay30, method="pearson")
+# corr = 0.5910182
+cor_3_30 <- cor(complete_data$logDay3, complete_data$logDay30, method="pearson")
+# corr = 0.7726751
+cor_7_30 <- cor(complete_data$logDay7, complete_data$logDay30, method="pearson")
+# corr = 0.8768275
+
+# Relationship with log views at 60 days
+cor_0_60 <- cor(complete_data$logDay0, complete_data$logDay60, method="pearson")
+# corr = 0.5334019
+cor_3_60 <- cor(complete_data$logDay3, complete_data$logDay60, method="pearson")
+# corr = 0.7072158
+cor_7_60 <- cor(complete_data$logDay7, complete_data$logDay60, method="pearson")
+# corr = 0.7815384
+
+# Relationship between views at 30 days vs. 60 days
+cor(complete_data$logDay30, complete_data$logDay60, method="pearson")
+# corr = 0.8807645
+
+# Relationship with nominal views at 30 days
+cor(complete_data$sum0, complete_data$sum30, method="pearson")
+# corr = 0.524553
+cor(complete_data$sum3, complete_data$sum30, method="pearson")
+# corr = 0.6605761
+cor(complete_data$sum7, complete_data$sum30, method="pearson")
+# corr = 0.8921246
+
+# Relationship with nominal views at 60 days
+cor(complete_data$sum0, complete_data$sum60, method="pearson")
+# corr = 0.3898874
+cor(complete_data$sum3, complete_data$sum60, method="pearson")
+# corr = 0.5358424
+cor(complete_data$sum7, complete_data$sum60, method="pearson")
+# corr = 0.5128073
+```
+
+## The Data
+
+There are over 4000 videos in the AwesomenessTV channel. This is an analysis to see whether 
+videos's views from day 0, day 3, day 7 are predictive of their views at day 30 and 60.
+
+In this dataset, there are many videos that are missing views for the first week after they are published.
+In addition, some videos have not aged to 30 or 60 days.  In total, there are `r nrow(complete_data)` videos with views on day 0, 3, 7, 30 and 60 for this analysis.  
+
+## Scatter Plots
+
+Scatter plots for `r nrow(complete_data)` for views at day 0, day 3 & day 7 versus views at day 30 & day 60.
+The horizontal and vertical scales have been set to be the same for all 6 plots for better visual comparisons.
+
+```{r graph1_prep, echo=FALSE, warning=FALSE}
+x_min = min(complete_data$logDay0, complete_data$logDay3, complete_data$logDay7)
+x_max = max(complete_data$logDay0, complete_data$logDay3, complete_data$logDay7)
+y_min = min(complete_data$logDay30, complete_data$logDay60)
+y_max = max(complete_data$logDay30, complete_data$logDay60)
+
+p0_30 <- ggplot(complete_data,aes(x=complete_data$logDay0, y=complete_data$logDay30)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4) +
+  geom_smooth(method='lm') +
+  ggtitle(paste("corr = ", round(cor_0_30, 3))) +
+  labs(x="Log Views Day 0",y="Log Views Day 30") 
+
+p3_30 <- ggplot(complete_data,aes(x=complete_data$logDay3, y=complete_data$logDay30)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4, color="dark green") +
+  geom_smooth(method='lm') +
+  scale_colour_hue(l=50) +
+  ggtitle(paste("corr = ", round(cor_3_30, 3))) +  
+  labs(x="Log Views Day 3",y="Log Views Day 30") 
+
+p7_30 <- ggplot(complete_data,aes(x=complete_data$logDay7, y=complete_data$logDay30)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4, color="purple") +
+  geom_smooth(method='lm') +
+  scale_colour_hue(l=75) +
+  ggtitle(paste("corr = ", round(cor_7_30, 3))) + 
+  labs(x="Log Views Day 7",y="Log Views Day 30") 
+
+p0_60 <- ggplot(complete_data,aes(x=complete_data$logDay0, y=complete_data$logDay60)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4) +
+  geom_smooth(method='lm') +
+  ggtitle(paste("corr = ", round(cor_0_60, 3))) +
+  labs(x="Log Views Day 0",y="Log Views Day 60")
+
+p3_60 <- ggplot(complete_data,aes(x=complete_data$logDay3, y=complete_data$logDay60)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4, color="dark green") +
+  geom_smooth(method='lm') +
+  scale_colour_hue(l=50) +
+  ggtitle(paste("corr = ", round(cor_3_60, 3))) +
+  labs(x="Log Views Day 3",y="Log Views Day 60") 
+
+p7_60 <- ggplot(complete_data,aes(x=complete_data$logDay7, y=complete_data$logDay60)) +
+  expand_limits(x=c(x_min, x_max), y=c(y_min, y_max)) +
+  geom_point(shape=19, alpha=1/4, color="purple") +
+  geom_smooth(method='lm') +
+  scale_colour_hue(l=75) +
+  ggtitle(paste("corr = ", round(cor_7_60, 3))) +
+  labs(x="Log Views Day 7",y="Log Views Day 60") 
+```
+
+```{r simple_scatterplot, echo=FALSE}
+multiplot(p0_30, p3_30, p7_30, p0_60, p3_60, p7_60, cols=2)
+```
+
+Note that as the predictive period is shortened the tigher the scatter plots are which seems to makes
+sense.  That means day 7 view is better at predicting day 30's views than day 0's view.  Moreover, all 
+scatterplots here show a positive trend for future video views.
+
+```{r linear_reg, include=FALSE, warning=FALSE}
+# Linear Regression to look at residuals
+lm0_30 <- lm(logDay30 ~ logDay0, data=complete_data)
+summary(lm0_30)
+#par(mfrow=c(2,2)) 
+#plot(lm0_30)
+
+lm3_30 <- lm(logDay30 ~ logDay3, data=complete_data)
+summary(lm3_30)
+#par(mfrow=c(2,2)) 
+#plot(lm3_30)
+
+lm7_30 <- lm(logDay30 ~ logDay7, data=complete_data)
+summary(lm7_30)
+#par(mfrow=c(2,2)) 
+
+lm0_60 <- lm(logDay60 ~ logDay0, data=complete_data)
+summary(lm0_60)
+#par(mfrow=c(2,2)) 
+#plot(lm0_60)
+
+lm3_60 <- lm(logDay60 ~ logDay3, data=complete_data)
+summary(lm3_60)
+#par(mfrow=c(2,2)) 
+#plot(lm3_60)
+
+lm7_60 <- lm(logDay60 ~ logDay7, data=complete_data)
+summary(lm7_60)
+#par(mfrow=c(2,2)) 
+#plot(lm7_60)
+```
+
+
+## Normality in Residuals from Linear Regressions
+
+In this analysis, normality of residuals is assumed.  It's important to test whether this assumption
+holds.  Since there are six regression combinations, it's not necessary to plot all 6 x 4 residual graphs. Here, I evaluate this by examining residual plots that for LogDay30 ~ Fn(LogDay7) as an illustration that normality assumption seems reasonable in this case.  
+
+
+```{r echo=FALSE, warning=FALSE}
+par(mfrow=c(2,2)) 
+plot(lm7_30)
+```
+
+
+```{r include=FALSE, echo=FALSE, warning=FALSE}
+lm0_30_res <- lm0_30$residuals
+lm3_30_res <- lm3_30$residuals
+lm7_30_res <- lm7_30$residuals
+
+lm0_60_res <- lm0_60$residuals
+lm3_60_res <- lm3_60$residuals
+lm7_60_res <- lm7_60$residuals
+
+histo_0_30 <- qplot(lm0_30_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 30 = Fn(day 0)",
+    col=I("gray"), 
+    fill=I("black"),
+    alpha=I(.7), 
+    xlab = "residuals")
+
+histo_3_30 <- qplot(lm3_30_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 30 = Fn(day 3)",
+    col=I("gray"), 
+    fill=I("dark green"),
+    alpha=I(.7), 
+    xlab = "residuals")
+
+histo_7_30 <- qplot(lm7_30_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 30 = Fn(day 7)",
+    col=I("gray"), 
+    fill=I("purple"),
+    alpha=I(.7), 
+    xlab = "residuals")
+
+histo_0_60 <- qplot(lm0_60_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 60 = Fn(day 0)",
+    col=I("gray"), 
+    fill=I("black"),
+    alpha=I(.7), 
+    xlab = "residuals")
+
+histo_3_60 <- qplot(lm3_60_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 60 = Fn(day 3)",
+    col=I("gray"), 
+    fill=I("dark green"),
+    alpha=I(.7), 
+    xlab = "residuals")
+
+histo_7_60 <- qplot(lm7_60_res, geom="histogram", 
+    binwidth = 1,
+    main = "day 60 = Fn(day 7)",
+    col=I("gray"), 
+    fill=I("purple"),
+    alpha=I(.7),  
+    xlab = "residuals")
+```
+
+
+## Histograms - Normality in Residuals
+
+Plotting the frequency of the residuals gives a visual sense of normality in the residuals.
+This implies that a simple linear regression of the differences between actual day 30/60 views 
+and predicted day 30/60 views falls within a normal distribution.  We should not expect too many 
+poorly predicted views and the errors in prediction are centered around zero.
+
+```{r echo=FALSE, warning=FALSE}
+multiplot(histo_0_30, histo_3_30, histo_7_30, histo_0_60, histo_3_60, histo_7_60, cols=2)
+```
+
+```{r disconnect_from_db, echo=FALSE, warning=FALSE, include=FALSE}
+# Disconnect jdbc connection when done
+dbDisconnect(conn)
+```
+
+## Summary
+
+In the 2008 Szabo and Huberman's article^1^, *Predicting the popularity of online content*, 
+where they've found correlation for views between early and later times, the awesomenessTV's videos also exhibit the same behavior.  This is good news as we can predict future views based on earlier views for our videos.
+
+There are other attributes to be explore in the future such as YouTube Category, Content Category, Topics and more
+that might impact views.
+
+### References
+1. Szabo, G and Huberman, B. (Nov 2008), Predicting the popularity of online content, *Cornell University Library, arXiv:0811.0405v1*, Retrieved from <http://arxiv.org/pdf/0811.0405.pdf>.
